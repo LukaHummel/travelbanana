@@ -1,11 +1,11 @@
 # travelbanana
 Travelrouter with integrated Android TV based on Banana PI BPI-M5 Pro
-# BPI‑M5 Pro Travel Router + Android TV Stack
+# BPI‑M5 Pro Travel Router + Android TV Stack (Cage + Waydroid)
 
 This document describes how to build a **travel router with integrated Android TV** on a **Banana Pi BPI‑M5 Pro (RK3576)** using:
 
 - **Debian/Armbian host**
-- **Weston** (Wayland compositor) on DRM/KMS
+- **Cage** as a Wayland kiosk compositor
 - **Waydroid** with **Waydroid‑ATV** images
 - **OpenWrt in an LXC container** as the router (WAN/LAN, DHCP, firewall, DNS)
 
@@ -39,10 +39,10 @@ Authoritative references for the **BPI‑M5 Pro**:
 ```text
 BPI-M5 Pro (RK3576) ─ Debian/Armbian host ─ systemd
 
- ├─ Weston (Wayland compositor, DRM/KMS, kiosk)
+ ├─ Cage (Wayland kiosk compositor)
  │    └─ Waydroid container
  │         └─ Android TV images (Waydroid-ATV)
- │             (HDMI output)
+ │             (HDMI output, full-screen, no other apps)
  │
  └─ LXC (host)
       └─ OpenWrt container (privileged)
@@ -52,6 +52,7 @@ BPI-M5 Pro (RK3576) ─ Debian/Armbian host ─ systemd
 
 - Host networking: **bridges only** (`br-wan`, `br-lan`).
 - OpenWrt container: **full router** (NAT, DHCP, DNS, firewall, Wi‑Fi AP).
+- Cage: runs a **single maximized application** (`waydroid show-full-ui`) as the only visible session.
 
 ---
 
@@ -84,10 +85,10 @@ Before layering anything else:
 - Confirm HDMI output + audio.
 - Confirm panfrost for Mali‑G52 (kernel logs + `glxinfo`/`kmscube`).
 
-Armbian Rockchip kernel tree and panfrost enablement (for reference):
+For GPU/kernel reference:
 
-- https://github.com/armbian/linux-rockchip  
-- https://github.com/armbian/linux-rockchip/pull/249
+- Armbian Rockchip kernel tree:  
+  https://github.com/armbian/linux-rockchip
 
 ---
 
@@ -98,13 +99,10 @@ Armbian Rockchip kernel tree and panfrost enablement (for reference):
 - LXC documentation hub:  
   https://linuxcontainers.org/lxc/documentation/
 
-- LXC homepage:  
-  https://linuxcontainers.org
-
 - LXC man page (config reference):  
   https://man7.org/linux/man-pages/man7/lxc.7.html
 
-- Debian‑oriented guide (unprivileged containers and bridges, good patterns):  
+- Debian‑oriented guide (unprivileged containers and bridges; good patterns even if you use a privileged OpenWrt container):  
   https://blog.michaelkelly.org/2023/09/lxc-containers-on-debian-part-1-setup/
 
 ### 4.2 Install and basic check
@@ -119,7 +117,7 @@ You want:
 
 - Namespaces, cgroup v2, veth, bridge, etc. all **enabled**.
 
-For OpenWrt specifically, use a **privileged container**, as that matches most working how‑tos and reduces surprises.
+For OpenWrt specifically, use a **privileged container**; it matches most working how‑tos and avoids capability surprises.
 
 ---
 
@@ -145,7 +143,7 @@ It documents two approaches:
 sudo lxc-create -n openwrt -t download -- -d openwrt -a arm64
 ```
 
-Choose a suitable release when prompted (if arm64+OpenWrt is offered by the template).
+Choose a suitable release when prompted (if arm64 + OpenWrt is offered by the template).
 
 #### Option B: via rootfs extraction (manual)
 
@@ -168,7 +166,7 @@ Follow the **“Via rootfs extraction”** section in the OpenWrt LXC doc:
 
 4. Create `/var/lib/lxc/openwrt/config` (see next subsection).
 
-For more automation ideas and caveats (x86/Proxmox oriented, but pattern is useful):
+For more automation ideas and caveats (x86/Proxmox oriented, but patterns are useful):
 
 - OpenWrt 23.05 LXC container (Proxmox) – GitHub Gist:  
   https://gist.github.com/suuhm/053f819b000bee4af922d66ff6c5d32e
@@ -282,94 +280,164 @@ Notes:
 
 ---
 
-## 7. Weston (DRM/KMS) on Host
+## 7. Cage as the Wayland Kiosk Compositor
 
-### 7.1 Docs
+### 7.1 Cage docs
 
-- Weston docs:  
-  https://wayland.pages.freedesktop.org/weston/index.html
+- Cage home page:  
+  https://www.hjdskes.nl/projects/cage/
 
-- Jetson Weston guide (good DRM/KMS + kiosk overview – conceptually applicable):  
-  https://docs.nvidia.com/jetson/archives/r38.4/DeveloperGuide/SD/WindowingSystems/WestonWayland.html
+- Cage wiki (GitHub):  
+  https://github.com/cage-kiosk/cage/wiki
 
-- Weston repo/mirror:  
-  https://github.com/intel/Intel-Distribution-of-Weston
+- Cage man page (CLI usage, options):  
+  https://manpages.ubuntu.com/manpages/noble/man1/cage.1.html
 
-### 7.2 Install Weston
+Summary:
 
-```bash
-sudo apt install weston
-```
+- Cage is a **Wayland kiosk compositor** that runs a **single maximized application**, preventing interaction with anything else.
+- The basic invocation is:
 
-Create a dedicated user:
+  ```bash
+  cage application [arguments...]
+  ```
 
-```bash
-sudo adduser tvuser
-```
-
-Configure **autologin** on tty1 (via `getty@tty1.service` override) for `tvuser`, then use a user‑level systemd unit to start Weston.
-
-### 7.3 Example systemd user unit for Weston
-
-```ini
-# ~/.config/systemd/user/weston.service
-
-[Unit]
-Description=Weston Wayland Compositor (DRM)
-After=graphical-session.target
-Wants=graphical-session.target
-
-[Service]
-Type=simple
-Environment= XDG_RUNTIME_DIR=/run/user/%U
-ExecStart=/usr/bin/weston --backend=drm-backend.so --tty=1 --idle-time=0
-Restart=on-failure
-
-[Install]
-WantedBy=default.target
-```
-
-Enable as `tvuser`:
-
-```bash
-systemctl --user enable weston.service
-systemctl --user start weston.service
-```
-
----
-
-## 8. Waydroid + Waydroid‑ATV
-
-### 8.1 Base Waydroid install
-
-Docs:
-
-- Waydroid: install on desktops:  
-  https://docs.waydro.id/usage/install-on-desktops
-
-- GitHub doc (same content source):  
-  https://github.com/waydroid/docs/blob/master/usage/install-on-desktops.md
+### 7.2 Install Cage and Waydroid
 
 On Debian/Armbian:
 
 ```bash
-curl -s https://repo.waydro.id | sudo bash      # add repo (use -s bookworm/trixie if needed)
+sudo apt update
+sudo apt install cage waydroid
+```
+
+Waydroid install/usage docs:
+
+- Install instructions:  
+  https://docs.waydro.id/usage/install-on-desktops
+
+Waydroid basics:
+
+```bash
+curl -s https://repo.waydro.id | sudo bash
 sudo apt install waydroid
 sudo waydroid init
 ```
 
-### 8.2 Swap in Android TV (Waydroid‑ATV)
+---
 
-Reference release (example – use latest):
+## 8. Waydroid‑Only Session with Cage
 
-- Waydroid‑ATV builds with install notes:  
-  https://newreleases.io/project/github/WayDroid-ATV/waydroid-androidtv-builds
+Waydroid’s “Waydroid only sessions” FAQ includes a **Cage** example.[^waydroid-sessions]
 
-From a typical release (e.g. lineages 20 ATV):
+### 8.1 Using a display manager (LightDM, GDM, SDDM, etc.)
 
-1. Download `lineage-20.0-*-UNOFFICIAL-WaydroidATV_*.zip`.
-2. Extract `system.img` and `vendor.img`.
-3. Place them into Waydroid extra images directory:
+If you have a display manager and want a **login‑screen selectable “Waydroid” session**:
+
+1. Ensure the Waydroid container is auto‑started at boot (optional but recommended):
+
+   ```bash
+   sudo systemctl enable waydroid-container
+   sudo systemctl start waydroid-container
+   ```
+
+2. Create a Wayland session file:
+
+   ```bash
+   sudo mkdir -p /usr/share/wayland-sessions
+   sudo nano /usr/share/wayland-sessions/waydroid.desktop
+   ```
+
+3. Put this in `waydroid.desktop`:
+
+   ```ini
+   [Desktop Entry]
+   Name=WayDroid in Cage
+   Comment=Android OS in a container
+   Exec=/usr/bin/cage waydroid show-full-ui
+   Type=Application
+   ```
+
+4. Reboot or restart your display manager. On the login screen, pick the **“WayDroid in Cage”** session.
+
+This will:
+
+- Start Cage as the compositor.
+- Cage will run `waydroid show-full-ui` as the single full‑screen client.
+
+### 8.2 Headless / kiosk via systemd (no display manager)
+
+If you don’t use a display manager and want the box to **boot straight into Android TV**:
+
+1. Ensure `waydroid-container` is enabled:
+
+   ```bash
+   sudo systemctl enable waydroid-container
+   sudo systemctl start waydroid-container
+   ```
+
+2. Create a dedicated user, e.g. `tvuser`:
+
+   ```bash
+   sudo adduser tvuser
+   ```
+
+3. Configure autologin for `tvuser` on `tty1` (e.g. via `getty@tty1.service` override).
+
+4. As `tvuser`, create a systemd user unit:
+
+   ```bash
+   mkdir -p ~/.config/systemd/user
+   nano ~/.config/systemd/user/waydroid-cage.service
+   ```
+
+5. Add:
+
+   ```ini
+   [Unit]
+   Description=Waydroid in Cage (Kiosk)
+   After=default.target
+   Wants=default.target
+
+   [Service]
+   Type=simple
+   Environment= XDG_RUNTIME_DIR=/run/user/%U
+   ExecStart=/usr/bin/cage waydroid show-full-ui
+   Restart=on-failure
+
+   [Install]
+   WantedBy=default.target
+   ```
+
+6. Enable and start:
+
+   ```bash
+   systemctl --user enable waydroid-cage.service
+   systemctl --user start waydroid-cage.service
+   ```
+
+Now boot → autologin `tvuser` on tty1 → systemd user session starts **Cage**, which in turn runs `waydroid show-full-ui` full‑screen.
+
+---
+
+## 9. Waydroid‑ATV Images
+
+To get Android TV instead of the default phone/tablet UI, use **Waydroid‑ATV builds**.
+
+### 9.1 Install Waydroid‑ATV images
+
+1. Pick a release from:  
+   https://newreleases.io/project/github/WayDroid-ATV/waydroid-androidtv-builds
+
+2. Download a ZIP such as:
+
+   ```text
+   lineage-20.0-*-UNOFFICIAL-WaydroidATV_*.zip
+   ```
+
+3. Extract `system.img` and `vendor.img`.
+
+4. Place them into Waydroid’s extra images directory:
 
    ```bash
    sudo mkdir -p /etc/waydroid-extra/images/
@@ -377,7 +445,7 @@ From a typical release (e.g. lineages 20 ATV):
    sudo cp vendor.img /etc/waydroid-extra/images/vendor.img
    ```
 
-4. Re‑init Waydroid:
+5. Re‑init Waydroid to pick up the new images:
 
    ```bash
    sudo waydroid init -f
@@ -385,73 +453,15 @@ From a typical release (e.g. lineages 20 ATV):
 
 Background context:
 
-- Reddit thread announcing Waydroid‑ATV effort and linking to the repo:  
-  https://www.reddit.com/r/waydroid/comments/1emc5kv/finally_got_android_tv_compiled_for_waydroid/
+- Waydroid command‑line options (`show-full-ui` etc.):  
+  https://github.com/waydroid/docs/blob/master/usage/waydroid-command-line-options.md
 
-### 8.3 Autostart Waydroid full UI under Weston
-
-Once Weston runs as `tvuser`:
-
-```bash
-sudo waydroid container start      # usually root; handle via sudoers or helper
-waydroid show-full-ui              # run as tvuser in Weston session
-```
-
-Wrap that in a script and a systemd user unit.
-
-**Script:**
-
-```bash
-# /usr/local/bin/waydroid-atv-start.sh
-#!/bin/bash
-set -e
-
-# Ensure container is up
-sudo waydroid container start
-
-# Give container a moment
-sleep 5
-
-# Launch full UI
-waydroid show-full-ui
-```
-
-```bash
-sudo chmod +x /usr/local/bin/waydroid-atv-start.sh
-```
-
-**User unit (tvuser):**
-
-```ini
-# ~/.config/systemd/user/waydroid-atv.service
-
-[Unit]
-Description=Waydroid Android TV Full UI
-After=weston.service
-Requires=weston.service
-
-[Service]
-Type=simple
-Environment= WAYLAND_DISPLAY=wayland-0
-ExecStart=/usr/local/bin/waydroid-atv-start.sh
-Restart=on-failure
-
-[Install]
-WantedBy=default.target
-```
-
-Enable:
-
-```bash
-systemctl --user enable waydroid-atv.service
-systemctl --user start waydroid-atv.service
-```
-
-On boot, `tvuser` autologins → Weston starts → Waydroid‑ATV launches full‑screen.
+- Waydroid install/usage:  
+  https://docs.waydro.id/usage/install-on-desktops
 
 ---
 
-## 9. OpenWrt Configuration Inside the Container
+## 10. OpenWrt Configuration Inside the Container
 
 Once the container is running:
 
@@ -469,21 +479,22 @@ Inside OpenWrt:
 
 2. Configure firewall, DNS, and optional Wi‑Fi AP as usual for an OpenWrt router.
 
-Reference again:
+Reference:
 
 - OpenWrt in LXC containers:  
   https://openwrt.org/docs/guide-user/virtualization/lxc
 
 ---
 
-## 10. Boot Flow Summary
+## 11. Boot Flow Summary
 
 1. **Bootloader → Armbian/Debian on RK3576**.
 2. systemd:
    - Brings up `br-wan`, `br-lan`, and physical NICs.  
    - Starts the **OpenWrt** LXC container (router).  
-3. On tty1, `tvuser` autologin:
-   - `systemd --user` starts **Weston** (DRM/KMS).  
-   - Weston then starts **Waydroid‑ATV** full‑screen.
+   - Starts the **Waydroid** container via `waydroid-container.service` (if enabled).
+3. Either:
+   - Display manager: user chooses “WayDroid in Cage” → Cage starts → `waydroid show-full-ui` full‑screen.  
+   - Kiosk mode: `tvuser` autologin → user systemd starts **Cage**, which runs `waydroid show-full-ui` full‑screen.
 
-The BPI‑M5 Pro now behaves as a travel router with a full Android TV front‑end on HDMI, all in one device.
+The BPI‑M5 Pro now behaves as a travel router with a full Android TV front‑end on HDMI, all in one device, with **Cage** providing a locked‑down, single‑app Wayland session.
