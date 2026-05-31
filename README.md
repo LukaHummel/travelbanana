@@ -308,7 +308,7 @@ On Debian/Armbian:
 
 ```bash
 sudo apt update
-sudo apt install cage waydroid
+sudo apt install cage
 ```
 
 Waydroid install/usage docs:
